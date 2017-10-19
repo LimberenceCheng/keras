@@ -23,7 +23,7 @@ class Wrapper(Layer):
     def __init__(self, layer, **kwargs):
         self.layer = layer
         # Tracks mapping of Wrapper inputs to inner layer inputs. Useful when
-        # the inner layer has update ops that depend on it's inputs (as opposed
+        # the inner layer has update ops that depend on its inputs (as opposed
         # to the inputs to the Wrapper layer).
         self._input_map = {}
         super(Wrapper, self).__init__(**kwargs)
@@ -76,10 +76,6 @@ class Wrapper(Layer):
             losses = self.layer.get_losses_for(None)
             return losses + super(Wrapper, self).get_losses_for(None)
         return super(Wrapper, self).get_losses_for(inputs)
-
-    @property
-    def constraints(self):
-        return self.layer.constraints
 
     def get_weights(self):
         return self.layer.get_weights()

@@ -310,6 +310,21 @@ class Layer(object):
         else:
             self._initial_weights = None
 
+    @staticmethod
+    def _node_key(layer, node_index):
+        """Converts a layer and its index to a unique (immutable type) name.
+        This function is used internally with `self.container_nodes`.
+
+        # Arguments
+            layer: The layer.
+            node_index: The layer's position (e.g. via enumerate) in a list of
+                nodes.
+
+        # Returns
+            The unique name.
+        """
+        return layer.name + '_ib-' + str(node_index)
+
     @property
     def losses(self):
         return self._losses
@@ -601,7 +616,7 @@ class Layer(object):
             else:
                 output = output_ls_copy
 
-            # Infering the output shape is only relevant for Theano.
+            # Inferring the output shape is only relevant for Theano.
             if all([s is not None for s in _to_list(input_shape)]):
                 output_shape = self.compute_output_shape(input_shape)
             else:
@@ -1083,7 +1098,7 @@ class Layer(object):
         if hasattr(self, '_losses'):
             self._losses += losses
         # Update self._per_input_updates
-        if isinstance(input, list) and inputs == []:
+        if isinstance(inputs, list) and inputs == []:
             inputs = None
         if inputs is not None:
             inputs_hash = _object_list_uid(inputs)
@@ -1357,7 +1372,7 @@ class InputLayer(Layer):
 
 
 def Input(shape=None, batch_shape=None,
-          name=None, dtype=K.floatx(), sparse=False,
+          name=None, dtype=None, sparse=False,
           tensor=None):
     """`Input()` is used to instantiate a Keras tensor.
 
@@ -1415,6 +1430,8 @@ def Input(shape=None, batch_shape=None,
                        'dimension.')
     if shape and not batch_shape:
         batch_shape = (None,) + tuple(shape)
+    if not dtype:
+        dtype = K.floatx()
     input_layer = InputLayer(batch_input_shape=batch_shape,
                              name=name, dtype=dtype,
                              sparse=sparse,
@@ -1669,9 +1686,8 @@ class Container(Layer):
             if node in finished_nodes:
                 return
 
-            node_key = layer.name + '_ib-' + str(node_index)
             # Update container_nodes.
-            container_nodes.add(node_key)
+            container_nodes.add(self._node_key(layer, node_index))
 
             # Store the traversal order for layer sorting.
             if layer not in layer_indices:
@@ -1790,7 +1806,8 @@ class Container(Layer):
                 raise RuntimeError('The name "' + name + '" is used ' +
                                    str(all_names.count(name)) +
                                    ' times in the model. '
-                                   'All layer names should be unique.')
+                                   'All layer names should be unique. '
+                                   'Layer names: ', all_names)
 
         # Layer parameters.
         # The new container starts with a single inbound node
@@ -1845,12 +1862,12 @@ class Container(Layer):
         else:
             if not name:
                 raise ValueError('Provide either a layer name or layer index.')
-        layer = None
+
         for layer in self.layers:
             if layer.name == name:
                 return layer
-        if not layer:
-            raise ValueError('No such layer: ' + name)
+
+        raise ValueError('No such layer: ' + name)
 
     @property
     def updates(self):
@@ -1870,7 +1887,7 @@ class Container(Layer):
                 # Collect updates that are dependent on inputs
                 # that are part of the model.
                 for node_index, node in enumerate(layer.inbound_nodes):
-                    node_key = layer.name + '_ib-' + str(node_index)
+                    node_key = self._node_key(layer, node_index)
                     if node_key in self.container_nodes:
                         # The model owns this layer node.
                         inputs = node.input_tensors
@@ -1898,7 +1915,7 @@ class Container(Layer):
                 # Collect losses that are dependent on inputs
                 # that are part of the model.
                 for node_index, node in enumerate(layer.inbound_nodes):
-                    node_key = layer.name + '_ib-' + str(node_index)
+                    node_key = self._node_key(layer, node_index)
                     if node_key in self.container_nodes:
                         # The model owns this layer node.
                         inputs = node.input_tensors
@@ -2285,6 +2302,10 @@ class Container(Layer):
         config = {
             'name': self.name,
         }
+
+        # Build a map from a layer unique name (self._node_key)
+        # to the index of the nodes that are saved in the config.
+        # Only nodes in container_nodes are saved.
         node_conversion_map = {}
         for layer in self.layers:
             if issubclass(layer.__class__, Container):
@@ -2294,17 +2315,20 @@ class Container(Layer):
             else:
                 kept_nodes = 0
             for original_node_index, node in enumerate(layer.inbound_nodes):
-                node_key = layer.name + '_ib-' + str(original_node_index)
+                node_key = self._node_key(layer, original_node_index)
                 if node_key in self.container_nodes:
+                    # i.e. we mark it to be saved
                     node_conversion_map[node_key] = kept_nodes
                     kept_nodes += 1
+
+        # serialize and save the layers in layer_configs
         layer_configs = []
         for layer in self.layers:  # From the earliest layers on.
             layer_class_name = layer.__class__.__name__
             layer_config = layer.get_config()
             filtered_inbound_nodes = []
             for original_node_index, node in enumerate(layer.inbound_nodes):
-                node_key = layer.name + '_ib-' + str(original_node_index)
+                node_key = self._node_key(layer, original_node_index)
                 if node_key in self.container_nodes:
                     # The node is relevant to the model:
                     # add to filtered_inbound_nodes.
@@ -2328,8 +2352,9 @@ class Container(Layer):
                             inbound_layer = node.inbound_layers[i]
                             node_index = node.node_indices[i]
                             tensor_index = node.tensor_indices[i]
-                            node_key = inbound_layer.name + '_ib-' + str(node_index)
-                            new_node_index = node_conversion_map.get(node_key, 0)
+
+                            new_node_index = node_conversion_map.get(
+                                self._node_key(inbound_layer, node_index), 0)
                             node_data.append([inbound_layer.name,
                                               new_node_index,
                                               tensor_index,
@@ -2348,7 +2373,10 @@ class Container(Layer):
         for i in range(len(self.input_layers)):
             layer = self.input_layers[i]
             node_index = self.input_layers_node_indices[i]
-            node_key = layer.name + '_ib-' + str(node_index)
+
+            node_key = self._node_key(layer, node_index)
+            if node_key not in self.container_nodes:
+                continue
             new_node_index = node_conversion_map[node_key]
             tensor_index = self.input_layers_tensor_indices[i]
             model_inputs.append([layer.name, new_node_index, tensor_index])
@@ -2357,7 +2385,10 @@ class Container(Layer):
         for i in range(len(self.output_layers)):
             layer = self.output_layers[i]
             node_index = self.output_layers_node_indices[i]
-            node_key = layer.name + '_ib-' + str(node_index)
+
+            node_key = self._node_key(layer, node_index)
+            if node_key not in self.container_nodes:
+                continue
             new_node_index = node_conversion_map[node_key]
             tensor_index = self.output_layers_tensor_indices[i]
             model_outputs.append([layer.name, new_node_index, tensor_index])
@@ -2411,11 +2442,11 @@ class Container(Layer):
                     raise ValueError('Improperly formatted model config.')
                 if inbound_layer_name not in created_layers:
                     add_unprocessed_node(layer, node_data)
-                    continue
+                    return
                 inbound_layer = created_layers[inbound_layer_name]
                 if len(inbound_layer.inbound_nodes) <= inbound_node_index:
                     add_unprocessed_node(layer, node_data)
-                    continue
+                    return
                 inbound_node = inbound_layer.inbound_nodes[inbound_node_index]
                 input_tensors.append(inbound_node.output_tensors[inbound_tensor_index])
             # Call layer on its inputs, thus creating the node
@@ -2987,7 +3018,7 @@ def preprocess_weights_for_loading(layer, weights,
                    'Conv2DTranspose',
                    'ConvLSTM2D']
     if layer.__class__.__name__ in conv_layers:
-        if original_backend and K.backend() != original_backend:
+        if _need_convert_kernel(original_backend):
             weights[0] = conv_utils.convert_kernel(weights[0])
             if layer.__class__.__name__ == 'ConvLSTM2D':
                 weights[1] = conv_utils.convert_kernel(weights[1])
@@ -2996,6 +3027,29 @@ def preprocess_weights_for_loading(layer, weights,
             if layer.__class__.__name__ == 'ConvLSTM2D':
                 weights[1] = np.transpose(weights[1], (3, 2, 0, 1))
     return weights
+
+
+def _need_convert_kernel(original_backend):
+    """Check if conversion on kernel matrices is required during weight loading.
+
+    The convolution operation is implemented differently in different backends.
+    While TH implements convolution, TF and CNTK implement the correlation operation.
+    So the channel axis needs to be flipped when we're loading TF weights onto a TH model,
+    or vice verca. However, there's no conversion required between TF and CNTK.
+
+    # Arguments
+        original_backend: Keras backend the weights were trained with, as a string.
+
+    # Returns
+        `True` if conversion on kernel matrices is required, otherwise `False`.
+    """
+    if original_backend is None:
+        # backend information not available
+        return False
+    uses_correlation = {'tensorflow': True,
+                        'theano': False,
+                        'cntk': True}
+    return uses_correlation[original_backend] != uses_correlation[K.backend()]
 
 
 def load_weights_from_hdf5_group(f, layers):
